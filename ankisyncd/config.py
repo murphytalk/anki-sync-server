@@ -22,6 +22,9 @@ def load(path=None):
         try:
             parser.read(path)
             conf = parser['sync_app']
+            if 'HOST' in os.environ:
+                print('HOST',os.environ['HOST'])
+                conf['host'] = os.environ['HOST']
             logging.info("Loaded config from {}".format(path))
             return conf
         except KeyError:
