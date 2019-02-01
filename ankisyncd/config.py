@@ -24,7 +24,7 @@ def load(path=None):
             conf = parser['sync_app']
             if 'HOST' in os.environ:
                 host = os.environ['HOST'].strip()
-                print('HOST [{}]'.host)
+                print('HOST [{}]'.format(host))
                 conf['host'] = host
             logging.info("Loaded config from {}".format(path))
             return conf
