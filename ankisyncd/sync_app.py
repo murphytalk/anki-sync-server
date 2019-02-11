@@ -41,7 +41,8 @@ from anki.consts import SYNC_VER, SYNC_ZIP_SIZE, SYNC_ZIP_COUNT
 from anki.consts import REM_CARD, REM_NOTE
 
 from ankisyncd.users import SimpleUserManager, SqliteUserManager
-
+from ankisyncd import UnknownRequest
+from ankisyncd.rest_app import RestApp
 
 class SyncCollectionHandler(anki.sync.Syncer):
     operations = ['meta', 'applyChanges', 'start', 'applyGraves', 'chunk', 'applyChunk', 'sanityCheck2', 'finish']
@@ -654,7 +655,8 @@ class SyncApp:
 
             return result
 
-        return "Anki Sync Server"
+        raise UnknownRequest()
+
 
     @staticmethod
     def _execute_handler_method_in_thread(method_name, keyword_args, session):
@@ -753,6 +755,28 @@ class SqliteSessionManager(SimpleSessionManager):
 def make_app(global_conf, **local_conf):
     return SyncApp(**local_conf)
 
+
+class AnkiServer(object):
+    def __init__(self, config):
+        self.apps = [
+            SyncApp(config),
+            RestApp(
+                config,
+                os.path.abspath(config['data_root']),
+                {'use_default_handlers', True}
+            )
+        ]
+
+    @wsgify
+    def __call__(self, req):
+        for app in self.apps:
+            try:
+                return app(req)
+            except UnknownRequest:
+                pass
+        return "Anki Server"
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
     from wsgiref.simple_server import make_server
@@ -765,7 +789,7 @@ def main():
     else:
         config = ankisyncd.config.load()
 
-    ankiserver = SyncApp(config)
+    ankiserver = AnkiServer(config)
     httpd = make_server(config['host'], int(config['port']), ankiserver)
 
     try:
