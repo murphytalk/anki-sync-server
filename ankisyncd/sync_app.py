@@ -758,12 +758,13 @@ def make_app(global_conf, **local_conf):
 
 class AnkiServer(object):
     def __init__(self, config):
+        kw = {'use_default_handlers': True}
         self.apps = [
             SyncApp(config),
             RestApp(
                 config,
                 os.path.abspath(config['data_root']),
-                {'use_default_handlers', True}
+                **kw 
             )
         ]
 

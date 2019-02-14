@@ -85,8 +85,7 @@ class RestApp(object):
     handler_types = ['collection', ['model', 'note', 'deck', 'card']]
 
     def __init__(self, config, data_root, **kw):
-        from thread import getCollectionManager
-
+        from ankisyncd.thread import getCollectionManager
         self.data_root = os.path.abspath(data_root)
         self.allowed_hosts = kw.get('allowed_hosts', '*')
         self.setup_new_collection = kw.get('setup_new_collection')
@@ -298,7 +297,7 @@ class RestApp(object):
         # special non-collection paths
         if req.path == '/':
             return Response(
-                'AnkiServer ' + str(AnkiServer.__version__), content_type='text/plain')
+                'AnkiServer ' , content_type='text/plain')
         if req.path == '/list_collections':
             return Response(json.dumps(self.list_collections()),
                             content_type='application/json')
@@ -308,7 +307,7 @@ class RestApp(object):
 
         # get the collection path
         collection_path = self._getCollectionPath(ids[0])
-        print collection_path
+        logging.debug("type={},name={},collection path={}".format(type,name,collection_path))
 
         # get the handler function
         handler, hasReturnValue = self._getHandler(type, name)
@@ -340,12 +339,12 @@ class RestApp(object):
         except Exception as e:
             logging.error(e)
             return HTTPInternalServerError()
-
         if output is None:
             return Response('', content_type='text/plain')
         else:
             return Response(json.dumps(output),
-                            content_type='application/json')
+                            content_type='application/json',
+                            charset='utf-8')
 
 
 class CollectionHandler(RestHandlerBase):
