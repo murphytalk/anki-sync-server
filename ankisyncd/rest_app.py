@@ -402,7 +402,7 @@ class CollectionHandler(RestHandlerBase):
 
         # TODO: I think this would be better with 'model' for the name
         # and 'mid' for the model id.
-        if type(req.data['model']) in (str, unicode):
+        if type(req.data['model']) is str:
             model = col.models.byName(req.data['model'])
         else:
             model = col.models.get(req.data['model'])
@@ -597,7 +597,7 @@ class CollectionHandler(RestHandlerBase):
         # put it into the card cache to be removed when we answer it
         # if not req.session.has_key('cards'):
         #    req.session['cards'] = {}
-        #req.session['cards'][long(card.id)] = card
+        #req.session['cards'][int(card.id)] = card
 
         card.startTimer()
 
@@ -614,7 +614,7 @@ class CollectionHandler(RestHandlerBase):
     def answer_card(self, col, req):
         import time
 
-        card_id = long(req.data['id'])
+        card_id = int(req.data['id'])
         ease = int(req.data['ease'])
 
         card = col.getCard(card_id)
@@ -662,7 +662,7 @@ class CollectionHandler(RestHandlerBase):
         args = []
         if 'updated_since' in req.data:
             sql += ' WHERE r.id > ?'
-            args.append(long(req.data['updated_since']) * 1000)
+            args.append(int(req.data['updated_since']) * 1000)
         sql += ' ORDER BY r.id DESC'
         sql += ' LIMIT ' + str(req.data.get('limit', 100))
 
@@ -914,7 +914,7 @@ class DeckHandler(RestHandlerBase):
     @staticmethod
     def _get_deck(col, val):
         try:
-            did = long(val)
+            did = int(val)
             deck = col.decks.get(did, False)
         except ValueError:
             deck = col.decks.byName(val)
