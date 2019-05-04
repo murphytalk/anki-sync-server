@@ -85,7 +85,7 @@ class RestApp(object):
     handler_types = ['collection', ['model', 'note', 'deck', 'card']]
 
     def __init__(self, config, data_root, **kw):
-        from ankisyncd.thread import getCollectionManager
+        from ankisyncd.thread import get_collection_manager
         self.data_root = os.path.abspath(data_root)
         self.allowed_hosts = kw.get('allowed_hosts', '*')
         self.setup_new_collection = kw.get('setup_new_collection')
@@ -95,7 +95,7 @@ class RestApp(object):
         if kw.get('collection_manager') is not None:
             self.collection_manager = kw['collection_manager']
         else:
-            self.collection_manager = getCollectionManager()
+            self.collection_manager = get_collection_manager(config)
 
         self.handlers = {}
         for type_list in self.handler_types:
