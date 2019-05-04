@@ -40,9 +40,12 @@ import anki.utils
 from anki.consts import SYNC_VER, SYNC_ZIP_SIZE, SYNC_ZIP_COUNT
 from anki.consts import REM_CARD, REM_NOTE
 
-from ankisyncd.users import SimpleUserManager, SqliteUserManager
-from ankisyncd import UnknownRequest
+from ankisyncd.users import get_user_manager
+from ankisyncd.sessions import get_session_manager
+from ankisyncd.full_sync import get_full_sync_manager
 from ankisyncd.rest_app import RestApp
+
+logger = logging.getLogger("ankisyncd")
 
 class SyncCollectionHandler(anki.sync.Syncer):
     operations = ['meta', 'applyChanges', 'start', 'applyGraves', 'chunk', 'applyChunk', 'sanityCheck2', 'finish']
@@ -62,11 +65,12 @@ class SyncCollectionHandler(anki.sync.Syncer):
         for name in note.keys():
             if name in version:
                 vs = version.split(name)
-                # remove potential suffix separators like "-" in "2.1.6-beta2"
-                version = re.sub("[^0-9]$", "", vs[0])
+                version = vs[0]
                 note[name] = int(vs[-1])
 
-        version_int = [int(x) for x in version.split('.')]
+        # convert the version string, ignoring non-numeric suffixes like in beta versions of Anki
+        version_nosuffix = re.sub(r'[^0-9.].*$', '', version)
+        version_int = [int(x) for x in version_nosuffix.split('.')]
 
         if client == 'ankidesktop':
             return version_int < [2, 0, 27]
@@ -292,12 +296,12 @@ class SyncMediaHandler(anki.sync.MediaSyncer):
                                       [(f, ) for f in filenames])
 
         # Remove the files from our media directory if it is present.
-        logging.debug('Removing %d files from media dir.' % len(filenames))
+        logger.debug('Removing %d files from media dir.' % len(filenames))
         for filename in filenames:
             try:
                 os.remove(os.path.join(self.col.media.dir(), filename))
             except OSError as err:
-                logging.error("Error when removing file '%s' from media dir: "
+                logger.error("Error when removing file '%s' from media dir: "
                               "%s" % (filename, str(err)))
 
     def downloadFiles(self, files):
@@ -380,31 +384,11 @@ class SyncUserSession:
         handler.col = col
         return handler
 
-class SimpleSessionManager:
-    """A simple session manager that keeps the sessions in memory."""
-
-    def __init__(self):
-        self.sessions = {}
-
-    def load(self, hkey, session_factory=None):
-        return self.sessions.get(hkey)
-
-    def load_from_skey(self, skey, session_factory=None):
-        for i in self.sessions:
-            if self.sessions[i].skey == skey:
-                return self.sessions[i]
-
-    def save(self, hkey, session):
-        self.sessions[hkey] = session
-
-    def delete(self, hkey):
-        del self.sessions[hkey]
-
 class SyncApp:
     valid_urls = SyncCollectionHandler.operations + SyncMediaHandler.operations + ['hostKey', 'upload', 'download']
 
     def __init__(self, config):
-        from ankisyncd.thread import getCollectionManager
+        from ankisyncd.thread import get_collection_manager
 
         self.data_root = os.path.abspath(config['data_root'])
         self.base_url  = config['base_url']
@@ -414,18 +398,10 @@ class SyncApp:
         self.prehooks = {}
         self.posthooks = {}
 
-        if "session_db_path" in config:
-            self.session_manager = SqliteSessionManager(config['session_db_path'])
-        else:
-            self.session_manager = SimpleSessionManager()
-
-        if "auth_db_path" in config:
-            self.user_manager = SqliteUserManager(config['auth_db_path'])
-        else:
-            logging.warn("auth_db_path not set, ankisyncd will accept any password")
-            self.user_manager = SimpleUserManager()
-
-        self.collection_manager = getCollectionManager()
+        self.user_manager = get_user_manager(config)
+        self.session_manager = get_session_manager(config)
+        self.full_sync_manager = get_full_sync_manager(config)
+        self.collection_manager = get_collection_manager(config)
 
         # make sure the base_url has a trailing slash
         if not self.base_url.endswith('/'):
@@ -508,37 +484,13 @@ class SyncApp:
     def operation_upload(self, col, data, session):
         # Verify integrity of the received database file before replacing our
         # existing db.
-        temp_db_path = session.get_collection_path() + ".tmp"
-        with open(temp_db_path, 'wb') as f:
-            f.write(data)
 
-        try:
-            with anki.db.DB(temp_db_path) as test_db:
-                if test_db.scalar("pragma integrity_check") != "ok":
-                    raise HTTPBadRequest("Integrity check failed for uploaded "
-                                         "collection database file.")
-        except sqlite.Error as e:
-            raise HTTPBadRequest("Uploaded collection database file is "
-                                 "corrupt.")
-
-        # Overwrite existing db.
-        col.close()
-        try:
-            os.rename(temp_db_path, session.get_collection_path())
-        finally:
-            col.reopen()
-            col.load()
-
-        return "OK"
+        return self.full_sync_manager.upload(col, data, session)
 
     def operation_download(self, col, session):
-        col.close()
-        try:
-            data = open(session.get_collection_path(), 'rb').read()
-        finally:
-            col.reopen()
-            col.load()
-        return data
+        # returns user data (not media) as a sqlite3 database for replacing their
+        # local copy in Anki
+        return self.full_sync_manager.download(col, session)
 
     @wsgify
     def __call__(self, req):
@@ -666,7 +618,7 @@ class SyncApp:
         self.col.
         """
 
-        def run_func(col):
+        def run_func(col, **keyword_args):
             # Retrieve the correct handler method.
             handler = session.get_handler_for_operation(method_name, col)
             handler_method = getattr(handler, method_name)
@@ -680,77 +632,10 @@ class SyncApp:
 
         # Send the closure to the thread for execution.
         thread = session.get_thread()
-        result = thread.execute(run_func)
+        result = thread.execute(run_func, kw=keyword_args)
 
         return result
 
-class SqliteSessionManager(SimpleSessionManager):
-    """Stores sessions in a SQLite database to prevent the user from being logged out
-    everytime the SyncApp is restarted."""
-
-    def __init__(self, session_db_path):
-        SimpleSessionManager.__init__(self)
-
-        self.session_db_path = os.path.realpath(session_db_path)
-
-    def _conn(self):
-        new = not os.path.exists(self.session_db_path)
-        conn = sqlite.connect(self.session_db_path)
-        if new:
-            cursor = conn.cursor()
-            cursor.execute("CREATE TABLE session (hkey VARCHAR PRIMARY KEY, skey VARCHAR, user VARCHAR, path VARCHAR)")
-        return conn
-
-    def load(self, hkey, session_factory=None):
-        session = SimpleSessionManager.load(self, hkey)
-        if session is not None:
-            return session
-
-        conn = self._conn()
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT skey, user, path FROM session WHERE hkey=?", (hkey,))
-        res = cursor.fetchone()
-
-        if res is not None:
-            session = self.sessions[hkey] = session_factory(res[1], res[2])
-            session.skey = res[0]
-            return session
-
-    def load_from_skey(self, skey, session_factory=None):
-        session = SimpleSessionManager.load_from_skey(self, skey)
-        if session is not None:
-            return session
-
-        conn = self._conn()
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT hkey, user, path FROM session WHERE skey=?", (skey,))
-        res = cursor.fetchone()
-
-        if res is not None:
-            session = self.sessions[res[0]] = session_factory(res[1], res[2])
-            session.skey = skey
-            return session
-
-    def save(self, hkey, session):
-        SimpleSessionManager.save(self, hkey, session)
-
-        conn = self._conn()
-        cursor = conn.cursor()
-
-        cursor.execute("INSERT OR REPLACE INTO session (hkey, skey, user, path) VALUES (?, ?, ?, ?)",
-            (hkey, session.skey, session.name, session.path))
-        conn.commit()
-
-    def delete(self, hkey):
-        SimpleSessionManager.delete(self, hkey)
-
-        conn = self._conn()
-        cursor = conn.cursor()
-
-        cursor.execute("DELETE FROM session WHERE hkey=?", (hkey,))
-        conn.commit()
 
 def make_app(global_conf, **local_conf):
     return SyncApp(**local_conf)
@@ -764,7 +649,7 @@ class AnkiServer(object):
             RestApp(
                 config,
                 os.path.abspath(config['data_root']),
-                **kw 
+                **kw
             )
         ]
 
@@ -779,10 +664,19 @@ class AnkiServer(object):
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
-    from wsgiref.simple_server import make_server
+    logging.basicConfig(level=logging.INFO, format="[%(asctime)s]:%(levelname)s:%(name)s:%(message)s")
+    from wsgiref.simple_server import make_server, WSGIRequestHandler
     from ankisyncd.thread import shutdown
     import ankisyncd.config
+
+    class RequestHandler(WSGIRequestHandler):
+        logger = logging.getLogger("ankisyncd.http")
+
+        def log_error(self, format, *args):
+            self.logger.error("%s %s", self.address_string(), format%args)
+
+        def log_message(self, format, *args):
+            self.logger.info("%s %s", self.address_string(), format%args)
 
     if len(sys.argv) > 1:
         # backwards compat
@@ -791,13 +685,13 @@ def main():
         config = ankisyncd.config.load()
 
     ankiserver = AnkiServer(config)
-    httpd = make_server(config['host'], int(config['port']), ankiserver)
+    httpd = make_server(config['host'], int(config['port']), ankiserver, handler_class=RequestHandler)
 
     try:
-        logging.info("Serving HTTP on {} port {}...".format(*httpd.server_address))
+        logger.info("Serving HTTP on {} port {}...".format(*httpd.server_address))
         httpd.serve_forever()
     except KeyboardInterrupt:
-        logging.info("Exiting...")
+        logger.info("Exiting...")
     finally:
         shutdown()
 

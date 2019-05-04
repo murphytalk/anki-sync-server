@@ -1,17 +1,41 @@
-from ankisyncd.collection import CollectionWrapper, CollectionManager
+from ankisyncd.collection import CollectionManager, get_collection_wrapper
 
 from threading import Thread
 from queue import Queue
 
 import time, logging
 
+def short_repr(obj, logger=logging.getLogger(), maxlen=80):
+    """Like repr, but shortens strings and bytestrings if logger's logging level
+    is above DEBUG. Currently shallow and very limited, only implemented for
+    dicts and lists."""
+    if logger.isEnabledFor(logging.DEBUG):
+        return repr(obj)
+
+    def shorten(s):
+        if isinstance(s, (bytes, str)) and len(s) > maxlen:
+            return s[:maxlen] + ("..." if isinstance(s, str) else b"...")
+        else:
+            return s
+
+    o = obj.copy()
+    if isinstance(o, dict):
+        for k in o:
+            o[k] = shorten(o[k])
+    elif isinstance(o, list):
+        for k in range(len(o)):
+            o[k] = shorten(o[k])
+
+    return repr(o)
+
 class ThreadingCollectionWrapper:
-    """Provides the same interface as CollectionWrapper, but it creates a new Thread to 
+    """Provides the same interface as CollectionWrapper, but it creates a new Thread to
     interact with the collection."""
 
-    def __init__(self, path, setup_new_collection=None):
+    def __init__(self, config, path, setup_new_collection=None):
         self.path = path
-        self.wrapper = CollectionWrapper(path, setup_new_collection)
+        self.wrapper = get_collection_wrapper(config, path, setup_new_collection)
+        self.logger = logging.getLogger("ankisyncd." + str(self))
 
         self._queue = Queue()
         self._thread = None
@@ -19,6 +43,9 @@ class ThreadingCollectionWrapper:
         self.last_timestamp = time.time()
 
         self.start()
+
+    def __str__(self):
+        return "CollectionThread[{}]".format(self.wrapper.username)
 
     @property
     def running(self):
@@ -53,7 +80,7 @@ class ThreadingCollectionWrapper:
             return ret
 
     def _run(self):
-        logging.info('CollectionThread[%s]: Starting...', self.path)
+        self.logger.info("Starting...")
 
         try:
             while self._running:
@@ -64,13 +91,13 @@ class ThreadingCollectionWrapper:
                 else:
                     func_name = func.__class__.__name__
 
-                logging.info('CollectionThread[%s]: Running %s(*%s, **%s)', self.path, func_name, repr(args), repr(kw))
+                self.logger.info("Running %s(*%s, **%s)", func_name, short_repr(args, self.logger), short_repr(kw, self.logger))
                 self.last_timestamp = time.time()
 
                 try:
                     ret = self.wrapper.execute(func, args, kw, return_queue)
                 except Exception as e:
-                    logging.error('CollectionThread[%s]: Unable to %s(*%s, **%s): %s',
+                    self.logger.error("Unable to %s(*%s, **%s): %s",
                         self.path, func_name, repr(args), repr(kw), e, exc_info=True)
                     # we return the Exception which will be raise'd on the other end
                     ret = e
@@ -78,7 +105,7 @@ class ThreadingCollectionWrapper:
                 if return_queue is not None:
                     return_queue.put(ret)
         except Exception as e:
-            logging.error('CollectionThread[%s]: Thread crashed! Exception: %s', self.path, e, exc_info=True)
+            self.logger.error("Thread crashed! Exception: %s", e, exc_info=True)
         finally:
             self.wrapper.close()
             # clean out old thread object
@@ -86,7 +113,7 @@ class ThreadingCollectionWrapper:
             # in case we got here via an exception
             self._running = False
 
-            logging.info('CollectionThread[%s]: Stopped!', self.path)
+            self.logger.info("Stopped!")
 
     def start(self):
         if not self._running:
@@ -129,11 +156,12 @@ class ThreadingCollectionManager(CollectionManager):
 
     collection_wrapper = ThreadingCollectionWrapper
 
-    def __init__(self):
-        super(ThreadingCollectionManager, self).__init__()
+    def __init__(self, config):
+        super(ThreadingCollectionManager, self).__init__(config)
 
         self.monitor_frequency = 15
         self.monitor_inactivity = 90
+        self.logger = logging.getLogger("ankisyncd.ThreadingCollectionManager")
 
         monitor = Thread(target=self._monitor_run)
         monitor.daemon = True
@@ -153,7 +181,7 @@ class ThreadingCollectionManager(CollectionManager):
             cur = time.time()
             for path, thread in self.collections.items():
                 if thread.running and thread.wrapper.opened() and thread.qempty() and cur - thread.last_timestamp >= self.monitor_inactivity:
-                    logging.info('Monitor is closing collection on inactive CollectionThread[%s]', thread.path)
+                    self.logger.info("Monitor is closing collection on inactive %s", thread)
                     thread.close()
             time.sleep(self.monitor_frequency)
 
@@ -174,11 +202,11 @@ class ThreadingCollectionManager(CollectionManager):
 
 collection_manager = None
 
-def getCollectionManager():
+def get_collection_manager(config):
     """Return the global ThreadingCollectionManager for this process."""
     global collection_manager
     if collection_manager is None:
-        collection_manager = ThreadingCollectionManager()
+        collection_manager = ThreadingCollectionManager(config)
     return collection_manager
 
 def shutdown():
